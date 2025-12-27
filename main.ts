@@ -66,7 +66,7 @@ const hS = [
   {id:"ent-claude-3-opus",name:"Claude 3 Opus",llmVersion:"claude-3-opus-latest"},
   {id:"ent-claude-3-opus-20240229",name:"Claude 3 Opus (20240229)",llmVersion:"claude-3-opus-20240229"},
   {id:"ent-claude-3-haiku",name:"Claude 3 Haiku",llmVersion:"claude-3-haiku-20240307"}
-  {id:"gpt-4o-search-preview", "name": "GPT-4o Search Preview", "llmVersion": "gpt-4o-search-preview"},
+  {id:"gpt-4o-search-preview",name:"GPT-4o Search Preview",llmVersion:"gpt-4o-search-preview"},
   {id:"gpt-4o-mini-search-preview", "name": "GPT-4o Mini Search Preview", "llmVersion": "gpt-4o-mini-search-preview"},
   
     
