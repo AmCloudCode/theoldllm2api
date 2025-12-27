@@ -116,6 +116,7 @@ const demoModels = [
   {id:"glm-4.5v",name:"GLM-4.5v"},
   {id:"glm-4.6",name:"GLM-4.6"},
   {id:"glm-4.7",name:"GLM-4.7"}
+];
 
 const imgModels = [
   {id:"sd-3.5-large",name:"SD 3.5 Large",provider:"Stability"},
