@@ -1,18 +1,16 @@
 // 配置常量
-const TARGET_URL = "https://theoldllm.vercel.app/entp/chat/send-message";
+const UPSTREAM_ORIGIN = "https://theoldllm.vercel.app";
 const DEFAULT_MODEL = "ent-claude-opus-4.5-20251101";
 
 // 硬编码的默认 Token (来自你的 curl)
-// 如果客户端请求头没有携带 Authorization，则使用此 Token
-const FALLBACK_TOKEN = "Bearer on_tenant_65566e34-de7f-490a-b88f-32ac8203b659.FlFtgizBOIHSKUrSYbSiT23u7VK3-AHqf64TtjN5v0qP-8AD8QJQ6RLxl0zG9Cgjj5R5ICdgNYFBz9JSv3OJcN3LiKtA6oJTj9CF_1nKjkZQ-InxkNfhEzktF52PXVvFxy7H1IR5JH9PnmMo467YfkAzf8z8vbRmW9WUQcqhBEMuxogPfqAIL1b60F8wGup7WChnADayGVAXyg0ihs4K-fXRyiR7OvXRii05DGX9XT7KtJvb24-XY_VEmWi8OO_o";
+const FALLBACK_TOKEN = "Bearer ";
 
-// 支持的模型列表
 const ALLOWED_MODELS = [
   "ent-claude-opus-4.5-20251101",
   "ent-claude-opus-4.1"
 ];
 
-// 伪装 Headers
+// 伪装 Headers (严格复制自你的成功抓包)
 const COMMON_HEADERS = {
   "authority": "theoldllm.vercel.app",
   "accept": "*/*",
@@ -23,9 +21,6 @@ const COMMON_HEADERS = {
   "sec-ch-ua": '"Chromium";v="137", "Not/A)Brand";v="24"',
   "sec-ch-ua-mobile": "?0",
   "sec-ch-ua-platform": '"Linux"',
-  "sec-fetch-dest": "empty",
-  "sec-fetch-mode": "cors",
-  "sec-fetch-site": "same-origin",
   "user-agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36"
 };
 
@@ -72,99 +67,141 @@ Deno.serve(async (req) => {
       const isStream = body.stream || false;
       const model = body.model || DEFAULT_MODEL;
 
-      // 获取 Authorization (优先使用客户端传的，没有则用默认的)
+      // 鉴权
       let authHeader = req.headers.get("Authorization");
       if (!authHeader || !authHeader.startsWith("Bearer ")) {
         authHeader = FALLBACK_TOKEN;
       }
 
-      // 转换 OpenAI Messages 为单一 Prompt 字符串
-      // 因为目标接口是单轮对话接口，需要手动拼接历史
-      const prompt = convertMessagesToPrompt(body.messages);
-
-      // 构造目标接口请求体
-      const upstreamBody = {
-        chat_session_id: crypto.randomUUID(), // 每次请求生成新 ID
-        parent_message_id: 1, // 模拟一个父 ID，通常 1 或随机数可行
-        message: prompt,
-        file_descriptors: [],
-        search_doc_ids: [],
-        retrieval_options: {}
-      };
-
-      // 发起请求
-      const upstreamResponse = await fetch(TARGET_URL, {
+      // --- 第一步：创建会话 (Create Chat Session) ---
+      // 根据 Logs，必须先请求这个接口拿到 chat_session_id
+      const createSessionResp = await fetch(`${UPSTREAM_ORIGIN}/entp/chat/create-chat-session`, {
         method: "POST",
         headers: {
           ...COMMON_HEADERS,
           "authorization": authHeader,
         },
-        body: JSON.stringify(upstreamBody),
+        body: JSON.stringify({
+          persona_id: 154, // 根据抓包数据硬编码
+          description: "Streaming chat session using gpt-5.2" // 描述可以随意，保留抓包原样
+        })
       });
 
-      if (!upstreamResponse.ok) {
-        return new Response(JSON.stringify({ error: `Upstream error: ${upstreamResponse.statusText}` }), {
-          status: upstreamResponse.status,
-          headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" },
-        });
+      if (!createSessionResp.ok) {
+        throw new Error(`Failed to create session: ${createSessionResp.statusText}`);
       }
 
-      // 处理流式响应 (Stream)
-      if (isStream) {
-        const stream = upstreamResponse.body;
-        if (!stream) {
-            throw new Error("No response body from upstream");
-        }
-        
-        const readable = new ReadableStream({
-          async start(controller) {
-            const reader = stream.getReader();
-            const decoder = new TextDecoder();
-            const encoder = new TextEncoder();
-            const id = `chatcmpl-${crypto.randomUUID()}`;
-            const created = Math.floor(Date.now() / 1000);
+      const sessionData = await createSessionResp.json();
+      const chatSessionId = sessionData.chat_session_id;
 
-            try {
-              while (true) {
-                const { done, value } = await reader.read();
-                if (done) {
-                  controller.enqueue(encoder.encode("data: [DONE]\n\n"));
-                  break;
-                }
+      if (!chatSessionId) {
+        throw new Error("Upstream did not return a chat_session_id");
+      }
+
+      // --- 第二步：转换消息并发送 (Send Message) ---
+      const prompt = convertMessagesToPrompt(body.messages);
+
+      const sendMsgResp = await fetch(`${UPSTREAM_ORIGIN}/entp/chat/send-message`, {
+        method: "POST",
+        headers: {
+          ...COMMON_HEADERS,
+          "authorization": authHeader,
+        },
+        body: JSON.stringify({
+          chat_session_id: chatSessionId,
+          parent_message_id: null, // 抓包显示为 null
+          message: prompt,
+          file_descriptors: [],
+          search_doc_ids: [],
+          retrieval_options: {}
+        }),
+      });
+
+      if (!sendMsgResp.ok) {
+         throw new Error(`Upstream error: ${sendMsgResp.statusText}`);
+      }
+
+      // --- 第三步：处理流式响应 ---
+      const stream = sendMsgResp.body;
+      if (!stream) throw new Error("No response body");
+
+      const readable = new ReadableStream({
+        async start(controller) {
+          const reader = stream.getReader();
+          const decoder = new TextDecoder();
+          const encoder = new TextEncoder();
+          const chatId = `chatcmpl-${crypto.randomUUID()}`;
+          const created = Math.floor(Date.now() / 1000);
+          
+          let buffer = "";
+
+          try {
+            while (true) {
+              const { done, value } = await reader.read();
+              if (done) break;
+              
+              const chunk = decoder.decode(value, { stream: true });
+              buffer += chunk;
+
+              // 按行处理 buffer (上游是 NDJSON)
+              const lines = buffer.split("\n");
+              // 保留最后一行（可能不完整）
+              buffer = lines.pop() || "";
+
+              for (const line of lines) {
+                if (!line.trim()) continue;
                 
-                // 目标接口可能返回原始文本，我们需要将其封装为 OpenAI 格式
-                const textChunk = decoder.decode(value, { stream: true });
-                
-                if (textChunk) {
-                  // 注意：如果目标接口返回的是 Vercel AI SDK 的格式 (如 0:"text")，
-                  // 这里可能需要做正则清洗。目前按纯文本处理。
-                  // 如果发现返回内容有乱码或引号，请在这里添加 cleanText(textChunk)
+                try {
+                  // 解析上游 JSON: {"ind": 1, "obj": {"type": "message_delta", "content": "Hi"}}
+                  const json = JSON.parse(line);
                   
-                  const chunkData = {
-                    id: id,
-                    object: "chat.completion.chunk",
-                    created: created,
-                    model: model,
-                    choices: [
-                      {
-                        index: 0,
-                        delta: { content: textChunk },
-                        finish_reason: null,
-                      },
-                    ],
-                  };
-                  controller.enqueue(encoder.encode(`data: ${JSON.stringify(chunkData)}\n\n`));
+                  if (json && json.obj) {
+                    const type = json.obj.type;
+                    const content = json.obj.content || "";
+
+                    // 只需要处理 content delta
+                    if (type === "message_delta" && content) {
+                      if (isStream) {
+                        const openaiChunk = {
+                            id: chatId,
+                            object: "chat.completion.chunk",
+                            created: created,
+                            model: model,
+                            choices: [{ index: 0, delta: { content: content }, finish_reason: null }]
+                        };
+                        controller.enqueue(encoder.encode(`data: ${JSON.stringify(openaiChunk)}\n\n`));
+                      } else {
+                        // 如果不是流式，先不在这里处理，下面有非流式逻辑，
+                        // 但为了统一代码结构，我们可以在这里通过 controller 传递
+                        // 实际部署通常客户端都请求 stream=true。
+                        // 简单起见，本代码强制以 stream 模式返回给客户端，或客户端需自行处理。
+                        // 如果必须支持非 stream，需要在外面包一层 accumulator。
+                      }
+                    } else if (type === "stop" || type === "section_end") {
+                        // 结束信号
+                    }
+                  }
+                } catch (e) {
+                  // 忽略 JSON 解析错误，继续下一行
                 }
               }
-            } catch (err) {
-              console.error("Stream reading error", err);
-              controller.error(err);
-            } finally {
-                controller.close();
             }
-          },
-        });
+            
+            // 结束
+            if (isStream) {
+              controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+            }
+          } catch (err) {
+            console.error("Stream error", err);
+            controller.error(err);
+          } finally {
+            controller.close();
+          }
+        },
+      });
 
+      // 如果客户端请求 stream: true
+      if (isStream) {
         return new Response(readable, {
           headers: {
             "Content-Type": "text/event-stream",
@@ -175,39 +212,45 @@ Deno.serve(async (req) => {
         });
       } 
       
-      // 处理非流式响应 (Normal)
+      // 如果客户端请求 stream: false (非流式)
+      // 我们需要把 readable 读完拼接成一个 JSON
       else {
-        const text = await upstreamResponse.text();
-        // 同样，如果返回包含 Vercel 协议字符，可能需要清洗
-        return new Response(
-          JSON.stringify({
+        const reader = readable.getReader();
+        const decoder = new TextDecoder();
+        let fullContent = "";
+        
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          const text = decoder.decode(value);
+          // 这里的 text 是 "data: {...}" 格式，需要提取 content
+          const lines = text.split("\n");
+          for (const l of lines) {
+             if (l.startsWith("data: ") && l !== "data: [DONE]") {
+                try {
+                    const data = JSON.parse(l.substring(6));
+                    if (data.choices && data.choices[0].delta.content) {
+                        fullContent += data.choices[0].delta.content;
+                    }
+                } catch {}
+             }
+          }
+        }
+
+        return new Response(JSON.stringify({
             id: `chatcmpl-${crypto.randomUUID()}`,
             object: "chat.completion",
             created: Math.floor(Date.now() / 1000),
             model: model,
-            choices: [
-              {
+            choices: [{
                 index: 0,
-                message: {
-                  role: "assistant",
-                  content: text,
-                },
-                finish_reason: "stop",
-              },
-            ],
-            usage: {
-              prompt_tokens: prompt.length, // 估算
-              completion_tokens: text.length, // 估算
-              total_tokens: prompt.length + text.length,
-            },
-          }),
-          {
-            headers: {
-              "Content-Type": "application/json",
-              "Access-Control-Allow-Origin": "*",
-            },
-          }
-        );
+                message: { role: "assistant", content: fullContent },
+                finish_reason: "stop"
+            }],
+            usage: { total_tokens: fullContent.length }
+        }), {
+            headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" }
+        });
       }
 
     } catch (e: any) {
@@ -218,18 +261,16 @@ Deno.serve(async (req) => {
     }
   }
 
-  // 404
   return new Response("Not Found", { status: 404 });
 });
 
 /**
- * 辅助函数：将 OpenAI 的 messages 数组转换为单一字符串 Prompt
+ * 将 messages 数组拼接为 Prompt
  */
 function convertMessagesToPrompt(messages: any[]): string {
   if (!Array.isArray(messages)) return "";
-  
+  // 简单拼接，可以根据模型偏好调整
   return messages.map((msg) => {
-    const role = msg.role.charAt(0).toUpperCase() + msg.role.slice(1); // System, User, Assistant
-    return `${role}: ${msg.content}`;
+    return `${msg.role}: ${msg.content}`;
   }).join("\n\n");
 }
